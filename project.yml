@@ -1,0 +1,37 @@
+name: PulseTrack
+options:
+  bundleIdPrefix: com.yourname
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  PulseTrack:
+    type: application
+    platform: iOS
+    sources: [PulseTrack]
+    info:
+      path: PulseTrack/Info.plist
+      properties:
+        CFBundleDisplayName: PulseTrack
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSHealthShareUsageDescription: "PulseTrack reads your Apple Watch sleep, heart rate, HRV and workout data to calculate your sleep score and recovery time."
+        NSHealthUpdateUsageDescription: "PulseTrack does not write any data to Apple Health."
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities: [healthkit]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIUserInterfaceStyle: Dark
+    entitlements:
+      path: PulseTrack/PulseTrack.entitlements
+      properties:
+        com.apple.developer.healthkit: true
+        com.apple.developer.healthkit.access: []
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.pulsetrack
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"

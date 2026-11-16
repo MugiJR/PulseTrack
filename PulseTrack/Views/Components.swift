@@ -107,17 +107,49 @@ struct EmptyStateView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Image(systemName: symbol).font(.system(size: 44)).foregroundStyle(.secondary)
-            Text(title).font(.title3.weight(.semibold))
-            Text(message).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            if !health.isDemo {
+            Image(systemName: health.awaitingFirstImport ? "square.stack.3d.up" : symbol)
+                .font(.system(size: 44)).foregroundStyle(.secondary)
+            Text(health.awaitingFirstImport ? "Waiting for your first sync" : title)
+                .font(.title3.weight(.semibold))
+            Text(health.awaitingFirstImport
+                 ? "Build the PulseTrack Sync shortcut and run it once. Your Apple Watch data will show up here."
+                 : message)
+                .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            if health.usesShortcut {
+                Button("Shortcut setup guide") { health.showShortcutGuide = true }
+                    .buttonStyle(.borderedProminent).tint(Theme.accent)
+                    .padding(.top, 4)
+                Button("Paste from clipboard") { health.importFromClipboard() }
+                    .buttonStyle(.bordered)
+            } else if !health.isDemo {
                 Button("Explore with demo data") { Task { await health.setDemo(true) } }
                     .buttonStyle(.bordered)
                     .padding(.top, 4)
             }
         }
         .padding(.vertical, 40)
+        .frame(maxWidth: .infinity)
         .card()
+    }
+}
+
+/// "Synced 2 hours ago" line shown at the top of each tab when using Shortcuts.
+struct SyncStatusView: View {
+    @Environment(HealthManager.self) private var health
+
+    var body: some View {
+        if health.usesShortcut, let last = health.lastImport {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.icloud.fill")
+                Text("Synced \(last.formatted(.relative(presentation: .named)))")
+                if Date().timeIntervalSince(last) > 12 * 3600 {
+                    Text("· run PulseTrack Sync to update").foregroundStyle(.orange)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -147,10 +179,20 @@ struct OptionsMenu: View {
     var body: some View {
         Menu {
             Button { Task { await health.refresh() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+            if health.usesShortcut {
+                Button { health.importFromClipboard() } label: { Label("Paste data from clipboard", systemImage: "doc.on.clipboard") }
+                Button { health.showShortcutGuide = true } label: { Label("Shortcut setup guide", systemImage: "square.stack.3d.up") }
+            }
+            Divider()
             if health.isDemo {
                 Button { Task { await health.setDemo(false) } } label: { Label("Use my Apple Watch data", systemImage: "applewatch") }
             } else {
                 Button { Task { await health.setDemo(true) } } label: { Label("Show demo data", systemImage: "sparkles") }
+            }
+            if health.source == .shortcut {
+                Button { Task { await health.useHealthKit() } } label: { Label("Try direct Apple Health access", systemImage: "heart") }
+            } else {
+                Button { Task { await health.useShortcut() } } label: { Label("Sync with Shortcuts instead", systemImage: "square.stack.3d.up") }
             }
         } label: {
             Image(systemName: "ellipsis.circle")

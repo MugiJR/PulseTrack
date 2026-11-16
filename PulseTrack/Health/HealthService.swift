@@ -14,8 +14,8 @@ extension HKUnit {
     static let ms = HKUnit.secondUnit(with: .milli)
 }
 
-/// Thin async wrapper around HealthKit. Read-only.
-final class HealthService {
+/// Direct HealthKit access (needs the HealthKit entitlement, i.e. a paid developer account or Xcode signing).
+final class HealthService: HealthDataSource {
     let store = HKHealthStore()
 
     static var isAvailable: Bool { HKHealthStore.isHealthDataAvailable() }
@@ -42,38 +42,63 @@ final class HealthService {
         try await store.requestAuthorization(toShare: [], read: readTypes)
     }
 
-    func sleepSamples(from start: Date, to end: Date) async throws -> [HKCategorySample] {
+    // MARK: HealthDataSource
+
+    func sleep(from start: Date, to end: Date) async throws -> [SleepRecord] {
         let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: [])
         let descriptor = HKSampleQueryDescriptor(
             predicates: [.categorySample(type: HKCategoryType(.sleepAnalysis), predicate: predicate)],
             sortDescriptors: [SortDescriptor(\.startDate)]
         )
-        return try await descriptor.result(for: store)
+        let samples = try await descriptor.result(for: store)
+        return samples.map { s in
+            SleepRecord(
+                stage: HKCategoryValueSleepAnalysis(rawValue: s.value).flatMap(SleepAnalyzer.stage(for:)),
+                start: s.startDate, end: s.endDate,
+                fromWatch: s.sourceRevision.productType?.hasPrefix("Watch") == true)
+        }
     }
 
-    func quantitySamples(_ id: HKQuantityTypeIdentifier, from start: Date, to end: Date) async throws -> [HKQuantitySample] {
+    func readings(_ metric: Metric, from start: Date, to end: Date) async throws -> [Reading] {
+        let (id, unit, scale): (HKQuantityTypeIdentifier, HKUnit, Double) = switch metric {
+        case .heartRate: (.heartRate, .bpm, 1)
+        case .restingHR: (.restingHeartRate, .bpm, 1)
+        case .hrv: (.heartRateVariabilitySDNN, .ms, 1)
+        case .respiratory: (.respiratoryRate, .bpm, 1)
+        case .oxygen: (.oxygenSaturation, .percent(), 100)
+        }
         let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: [])
         let descriptor = HKSampleQueryDescriptor(
             predicates: [.quantitySample(type: HKQuantityType(id), predicate: predicate)],
             sortDescriptors: [SortDescriptor(\.startDate)]
         )
-        return try await descriptor.result(for: store)
+        return try await descriptor.result(for: store).map {
+            Reading(date: $0.startDate, value: $0.quantity.doubleValue(for: unit) * scale)
+        }
     }
 
-    func average(_ id: HKQuantityTypeIdentifier, unit: HKUnit, from start: Date, to end: Date) async throws -> Double? {
-        let samples = try await quantitySamples(id, from: start, to: end)
-        guard !samples.isEmpty else { return nil }
-        return samples.map { $0.quantity.doubleValue(for: unit) }.reduce(0, +) / Double(samples.count)
-    }
-
-    func workouts(since: Date, limit: Int) async throws -> [HKWorkout] {
+    func workouts(since: Date, limit: Int) async throws -> [WorkoutRecord] {
         let predicate = HKQuery.predicateForSamples(withStart: since, end: Date(), options: [])
         let descriptor = HKSampleQueryDescriptor(
             predicates: [.workout(predicate)],
             sortDescriptors: [SortDescriptor(\.endDate, order: .reverse)],
             limit: limit
         )
-        return try await descriptor.result(for: store)
+        return try await descriptor.result(for: store).map { w in
+            let hrStats = w.statistics(for: HKQuantityType(.heartRate))
+            let distanceTypes: [HKQuantityTypeIdentifier] = [.distanceWalkingRunning, .distanceCycling, .distanceSwimming]
+            return WorkoutRecord(
+                id: w.uuid,
+                name: w.workoutActivityType.displayName,
+                symbol: w.workoutActivityType.symbol,
+                start: w.startDate, end: w.endDate,
+                energy: w.statistics(for: HKQuantityType(.activeEnergyBurned))?.sumQuantity()?.doubleValue(for: .kilocalorie()),
+                distance: distanceTypes.lazy
+                    .compactMap { w.statistics(for: HKQuantityType($0))?.sumQuantity()?.doubleValue(for: .meter()) }
+                    .first,
+                avgHR: hrStats?.averageQuantity()?.doubleValue(for: .bpm),
+                maxHR: hrStats?.maximumQuantity()?.doubleValue(for: .bpm))
+        }
     }
 
     func age() -> Int? {

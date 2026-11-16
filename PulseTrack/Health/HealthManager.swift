@@ -1,14 +1,22 @@
 import Foundation
-import HealthKit
 import Observation
+import UIKit
 
 @MainActor
 @Observable
 final class HealthManager {
     enum Phase: Equatable { case idle, loading, ready, failed(String) }
 
+    /// Where data comes from: HealthKit directly, or a Shortcuts automation (works with free sideloading).
+    enum Source: String { case healthKit, shortcut }
+
     var phase: Phase = .idle
     var isDemo = false
+    var source: Source? = UserDefaults.standard.string(forKey: "dataSource").flatMap(Source.init(rawValue:)) {
+        didSet { UserDefaults.standard.set(source?.rawValue, forKey: "dataSource") }
+    }
+    var lastImport: Date? = ImportStore.shared.lastImport
+    var showShortcutGuide = false
 
     var selectedDay: Date = Calendar.current.startOfDay(for: .now)
     var night: SleepNight?
@@ -25,18 +33,30 @@ final class HealthManager {
     var maxHR: Double = 190
     var restingHR: Double = 60
 
-    private let service = HealthService()
+    @ObservationIgnored private let healthKit = HealthService()
     @ObservationIgnored private var lastBaselines = Baselines()
+    @ObservationIgnored private var observer: NSObjectProtocol?
 
     private struct Baselines {
         var hrvToday: Double?, hrvBase: Double?, rhrToday: Double?, rhrBase: Double?
     }
 
-    var hasConnected: Bool = UserDefaults.standard.bool(forKey: "hasConnectedHealth") {
-        didSet { UserDefaults.standard.set(hasConnected, forKey: "hasConnectedHealth") }
+    init() {
+        observer = NotificationCenter.default.addObserver(forName: ImportStore.didChange, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in await self?.refresh() }
+        }
     }
 
-    var needsOnboarding: Bool { !hasConnected && !isDemo }
+    private var dataSource: HealthDataSource {
+        if source == .shortcut {
+            return ImportedSource(restingHR: restingHR, maxHR: maxHR)
+        }
+        return healthKit
+    }
+
+    var needsOnboarding: Bool { source == nil && !isDemo }
+    var usesShortcut: Bool { source == .shortcut && !isDemo }
+    var awaitingFirstImport: Bool { usesShortcut && lastImport == nil }
 
     var selectedWorkout: WorkoutSummary? {
         workouts.first { $0.id == selectedWorkoutID } ?? workouts.first
@@ -49,6 +69,8 @@ final class HealthManager {
         return nil
     }
 
+    var isEntitlementError: Bool { errorMessage?.localizedCaseInsensitiveContains("entitlement") == true }
+
     func recoveryHours(for workout: WorkoutSummary) -> Double {
         RecoveryCalculator.baseHours(load: workout.load) * recoveryModifier
     }
@@ -56,14 +78,39 @@ final class HealthManager {
     // MARK: - Lifecycle
 
     func start() async {
-        if hasConnected { await refresh() }
+        if source != nil { await refresh() }
     }
 
     func connect() async {
         do {
-            try await service.requestAuthorization()
-            hasConnected = true
+            try await healthKit.requestAuthorization()
+            source = .healthKit
+            isDemo = false
             await refresh()
+        } catch {
+            phase = .failed(error.localizedDescription)
+        }
+    }
+
+    func useShortcut() async {
+        source = .shortcut
+        isDemo = false
+        if lastImport == nil { showShortcutGuide = true }
+        await refresh()
+    }
+
+    func useHealthKit() async {
+        await connect()
+    }
+
+    func importFromClipboard() {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+            phase = .failed("The clipboard is empty. Run the PulseTrack Sync shortcut with \"Copy to Clipboard\" first.")
+            return
+        }
+        do {
+            try ImportStore.shared.ingest(text)
+            if source == nil { source = .shortcut }
         } catch {
             phase = .failed(error.localizedDescription)
         }
@@ -72,7 +119,7 @@ final class HealthManager {
     func setDemo(_ on: Bool) async {
         isDemo = on
         selectedDay = Calendar.current.startOfDay(for: .now)
-        if !on && !hasConnected {
+        if !on && source == nil {
             night = nil; sleepScore = nil; history = []; workouts = []; zones = []; recovery = nil
             phase = .idle
             return
@@ -81,10 +128,11 @@ final class HealthManager {
     }
 
     func refresh() async {
+        lastImport = ImportStore.shared.lastImport
         phase = .loading
         if isDemo { loadDemo(); phase = .ready; return }
         do {
-            if let age = service.age() { maxHR = 208 - 0.7 * Double(age) }
+            if let age = dataSource.age() { maxHR = 208 - 0.7 * Double(age) }
             lastBaselines = try await loadBaselines()
             restingHR = lastBaselines.rhrBase ?? lastBaselines.rhrToday ?? 60
             try await loadSleep()
@@ -117,20 +165,18 @@ final class HealthManager {
     // MARK: - Loading
 
     private func loadBaselines() async throws -> Baselines {
-        let hrv = try await dailyMeans(.heartRateVariabilitySDNN, unit: .ms, days: 30)
-        let rhr = try await dailyMeans(.restingHeartRate, unit: .bpm, days: 30)
+        let hrv = try await dailyMeans(.hrv, days: 30)
+        let rhr = try await dailyMeans(.restingHR, days: 30)
         let h = split(hrv), r = split(rhr)
         return Baselines(hrvToday: h.today, hrvBase: h.baseline, rhrToday: r.today, rhrBase: r.baseline)
     }
 
-    private func dailyMeans(_ id: HKQuantityTypeIdentifier, unit: HKUnit, days: Int) async throws -> [Date: Double] {
+    private func dailyMeans(_ metric: Metric, days: Int) async throws -> [Date: Double] {
         let cal = Calendar.current
         let start = cal.date(byAdding: .day, value: -days, to: cal.startOfDay(for: .now))!
-        let samples = try await service.quantitySamples(id, from: start, to: .now)
-        let grouped = Dictionary(grouping: samples) { cal.startOfDay(for: $0.startDate) }
-        return grouped.mapValues { arr in
-            arr.map { $0.quantity.doubleValue(for: unit) }.reduce(0, +) / Double(arr.count)
-        }
+        let readings = try await dataSource.readings(metric, from: start, to: .now)
+        let grouped = Dictionary(grouping: readings) { cal.startOfDay(for: $0.date) }
+        return grouped.mapValues { arr in arr.map(\.value).reduce(0, +) / Double(arr.count) }
     }
 
     private func split(_ means: [Date: Double]) -> (today: Double?, baseline: Double?) {
@@ -144,8 +190,8 @@ final class HealthManager {
 
     private func loadSleep() async throws {
         let window = SleepAnalyzer.window(for: selectedDay)
-        let samples = try await service.sleepSamples(from: window.start, to: window.end)
-        let segments = SleepAnalyzer.segments(from: samples)
+        let records = try await dataSource.sleep(from: window.start, to: window.end)
+        let segments = SleepAnalyzer.segments(from: records)
         guard !segments.isEmpty else { night = nil; sleepScore = nil; return }
         var n = SleepNight(wakeDay: selectedDay, segments: segments)
         n.vitals = try await vitals(from: n.start, to: n.end)
@@ -154,11 +200,12 @@ final class HealthManager {
     }
 
     private func vitals(from start: Date, to end: Date) async throws -> SleepVitals {
-        let hr = try await service.average(.heartRate, unit: .bpm, from: start, to: end)
-        let hrv = try await service.average(.heartRateVariabilitySDNN, unit: .ms, from: start, to: end)
-        let resp = try await service.average(.respiratoryRate, unit: .bpm, from: start, to: end)
-        let spo2 = try await service.average(.oxygenSaturation, unit: .percent(), from: start, to: end)
-        return SleepVitals(heartRate: hr, hrv: hrv, respiratoryRate: resp, oxygen: spo2.map { $0 * 100 })
+        let source = dataSource
+        let hr = try await source.average(.heartRate, from: start, to: end)
+        let hrv = try await source.average(.hrv, from: start, to: end)
+        let resp = try await source.average(.respiratory, from: start, to: end)
+        let spo2 = try await source.average(.oxygen, from: start, to: end)
+        return SleepVitals(heartRate: hr, hrv: hrv, respiratoryRate: resp, oxygen: spo2)
     }
 
     private func loadHistory() async throws {
@@ -166,12 +213,11 @@ final class HealthManager {
         let today = cal.startOfDay(for: .now)
         let days = (0..<7).compactMap { cal.date(byAdding: .day, value: -$0, to: today) }.reversed()
         guard let first = days.first else { return }
-        let samples = try await service.sleepSamples(from: SleepAnalyzer.window(for: first).start,
-                                                     to: SleepAnalyzer.window(for: today).end)
+        let records = try await dataSource.sleep(from: SleepAnalyzer.window(for: first).start,
+                                                 to: SleepAnalyzer.window(for: today).end)
         history = days.compactMap { day in
             let w = SleepAnalyzer.window(for: day)
-            let daySamples = samples.filter { $0.startDate >= w.start && $0.startDate < w.end }
-            let segs = SleepAnalyzer.segments(from: daySamples)
+            let segs = SleepAnalyzer.segments(from: records.filter { $0.start >= w.start && $0.start < w.end })
             guard !segs.isEmpty else { return nil }
             return NightScore(date: day, score: SleepScorer.score(SleepNight(wakeDay: day, segments: segs)).total)
         }
@@ -179,25 +225,16 @@ final class HealthManager {
 
     private func loadWorkouts() async throws {
         let since = Calendar.current.date(byAdding: .day, value: -30, to: .now)!
-        let hk = try await service.workouts(since: since, limit: 25)
-        workouts = hk.map(summary(for:))
+        let records = try await dataSource.workouts(since: since, limit: 25)
+        workouts = records.map { r in
+            WorkoutSummary(
+                id: r.id, name: r.name, symbol: r.symbol, start: r.start, end: r.end,
+                energy: r.energy, distance: r.distance, avgHR: r.avgHR, maxHR: r.maxHR,
+                load: RecoveryCalculator.trainingLoad(duration: r.end.timeIntervalSince(r.start), avgHR: r.avgHR,
+                                                      restingHR: restingHR, maxHR: maxHR, energy: r.energy))
+        }
         selectedWorkoutID = workouts.first?.id
         if let w = workouts.first { await loadZones(for: w) } else { zones = [] }
-    }
-
-    private func summary(for w: HKWorkout) -> WorkoutSummary {
-        let hrStats = w.statistics(for: HKQuantityType(.heartRate))
-        let avg = hrStats?.averageQuantity()?.doubleValue(for: .bpm)
-        let mx = hrStats?.maximumQuantity()?.doubleValue(for: .bpm)
-        let kcal = w.statistics(for: HKQuantityType(.activeEnergyBurned))?.sumQuantity()?.doubleValue(for: .kilocalorie())
-        let distanceTypes: [HKQuantityTypeIdentifier] = [.distanceWalkingRunning, .distanceCycling, .distanceSwimming]
-        let dist = distanceTypes.lazy
-            .compactMap { w.statistics(for: HKQuantityType($0))?.sumQuantity()?.doubleValue(for: .meter()) }
-            .first
-        let load = RecoveryCalculator.trainingLoad(duration: w.duration, avgHR: avg, restingHR: restingHR, maxHR: maxHR, energy: kcal)
-        return WorkoutSummary(id: w.uuid, name: w.workoutActivityType.displayName, symbol: w.workoutActivityType.symbol,
-                              start: w.startDate, end: w.endDate, energy: kcal, distance: dist,
-                              avgHR: avg, maxHR: mx, load: load)
     }
 
     private func loadZones(for w: WorkoutSummary) async {
@@ -205,9 +242,8 @@ final class HealthManager {
             zones = ZoneCalculator.zones(samples: DemoData.heartRateSeries(for: w), end: w.end, maxHR: maxHR)
             return
         }
-        let samples = (try? await service.quantitySamples(.heartRate, from: w.start, to: w.end)) ?? []
-        zones = ZoneCalculator.zones(samples: samples.map { (date: $0.startDate, bpm: $0.quantity.doubleValue(for: .bpm)) },
-                                     end: w.end, maxHR: maxHR)
+        let readings = (try? await dataSource.readings(.heartRate, from: w.start, to: w.end)) ?? []
+        zones = ZoneCalculator.zones(samples: readings.map { (date: $0.date, bpm: $0.value) }, end: w.end, maxHR: maxHR)
     }
 
     private func computeRecovery() {

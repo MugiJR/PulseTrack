@@ -33,6 +33,30 @@ All data is read-only, comes from Apple Health and stays on the device. A **demo
 6. Turn on **Developer Mode** if iOS asks: **Settings → Privacy & Security → Developer Mode** → on, then restart.
 7. Open PulseTrack → **Connect Apple Health** → allow all categories.
 
+### 3. Get your Apple Watch data in with Shortcuts
+Apps signed with a free Apple ID aren't allowed direct Apple Health access (you'd see *"Missing com.apple.developer.healthkit entitlement"*). Apple's **Shortcuts** app can read Health data, so PulseTrack gets it from a shortcut:
+
+1. Open PulseTrack → **Sync with Shortcuts**. A guide opens with every step. You can reopen it any time from the ••• menu → *Shortcut setup guide*.
+2. Build the **PulseTrack Sync** shortcut. For each data type it uses *Find Health Samples → Repeat with Each → Text `CODE|Start Date|End Date|Value` (dates in ISO 8601) → Add to Variable "Lines"*. At the end it uses *Combine Text → Import Health Data (PulseTrack)*.
+
+   | Health type | Last N days | Code |
+   |---|---|---|
+   | Sleep Analysis | 8 | `S` |
+   | Heart Rate | 2 (7 on the first run) | `HR` |
+   | Resting Heart Rate | 30 | `RHR` |
+   | Heart Rate Variability | 30 | `HRV` |
+   | Respiratory Rate *(optional)* | 8 | `RR` |
+   | Blood Oxygen *(optional)* | 8 | `O2` |
+   | Workouts *(optional, use Type instead of Value)* | 30 | `W` |
+
+3. Run it once and allow Health access.
+4. Shortcuts → **Automation** → **+** → **App** → PulseTrack → *Is Opened* → *Run Immediately* → PulseTrack Sync. Your data now refreshes every time you open the app.
+
+PulseTrack keeps 45 days of synced samples on the phone, so each daily sync only needs the last few days.
+
+### Updating the app after code changes
+Upload the changed files to the same GitHub repo (uploading over the same paths replaces them). Wait for the green tick in **Actions**, download the new `.ipa`, and sideload it with the **same Apple ID**. It installs over the old version and keeps your data.
+
 ### Limits of a free Apple ID
 - The app stops opening after **7 days**. Plug in and press Start in Sideloadly again (or turn on its auto-refresh). Your data lives in Apple Health, so nothing is lost.
 - You can have at most 3 sideloaded apps at a time.

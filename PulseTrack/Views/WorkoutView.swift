@@ -8,6 +8,7 @@ struct WorkoutView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
+                    SyncStatusView()
                     if let error = health.errorMessage { ErrorBanner(message: error) }
 
                     if let w = health.selectedWorkout {

@@ -9,6 +9,7 @@ struct SleepView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     dayPicker
+                    SyncStatusView()
                     if let error = health.errorMessage { ErrorBanner(message: error) }
 
                     if let night = health.night, let score = health.sleepScore {

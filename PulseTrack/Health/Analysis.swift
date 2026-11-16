@@ -13,14 +13,13 @@ enum SleepAnalyzer {
 
     /// Converts HealthKit samples into non-overlapping stage segments.
     /// Prefers Apple Watch samples (which have stages) over iPhone "in bed" data.
-    static func segments(from samples: [HKCategorySample]) -> [StageSegment] {
-        let watch = samples.filter { $0.sourceRevision.productType?.hasPrefix("Watch") == true }
-        let source = watch.isEmpty ? samples : watch
+    static func segments(from records: [SleepRecord]) -> [StageSegment] {
+        let watch = records.filter(\.fromWatch)
+        let source = watch.isEmpty ? records : watch
 
-        let raw: [StageSegment] = source.compactMap { sample in
-            guard let value = HKCategoryValueSleepAnalysis(rawValue: sample.value),
-                  let stage = stage(for: value) else { return nil }
-            return StageSegment(stage: stage, start: sample.startDate, end: sample.endDate)
+        let raw: [StageSegment] = source.compactMap { record in
+            guard let stage = record.stage else { return nil }
+            return StageSegment(stage: stage, start: record.start, end: record.end)
         }
         .sorted { $0.start < $1.start }
 

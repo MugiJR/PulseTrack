@@ -8,6 +8,7 @@ struct RecoveryView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
+                    SyncStatusView()
                     if let error = health.errorMessage { ErrorBanner(message: error) }
 
                     if let r = health.recovery, r.lastWorkout != nil || !r.factors.isEmpty {

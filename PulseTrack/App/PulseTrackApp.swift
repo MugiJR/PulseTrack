@@ -14,8 +14,10 @@ struct PulseTrackApp: App {
 
 struct RootView: View {
     @Environment(HealthManager.self) private var health
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        @Bindable var health = health
         Group {
             if health.needsOnboarding {
                 OnboardingView()
@@ -31,7 +33,16 @@ struct RootView: View {
                 .tint(Theme.accent)
             }
         }
+        .sheet(isPresented: $health.showShortcutGuide) {
+            ShortcutGuideView()
+                .preferredColorScheme(.dark)
+        }
         .preferredColorScheme(.dark)
         .task { await health.start() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active && health.usesShortcut {
+                Task { await health.refresh() }
+            }
+        }
     }
 }
